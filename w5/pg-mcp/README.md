@@ -686,3 +686,24 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 - 基于 [FastMCP](https://github.com/jlowin/fastmcp) 构建
 - SQL 解析由 [sqlglot](https://github.com/tobymao/sqlglot) 提供
 - 数据库驱动：[asyncpg](https://github.com/MagicStack/asyncpg)
+
+## Review 修复：数据库路由与访问策略
+
+保留原有 `DATABASE_*` 单库配置。设置 `DATABASES` JSON 数组后，以数组作为完整数据库清单，按 `name` 精确选择连接池和执行器；多库请求必须指定 `database`，重复数据库名称会导致启动失败。
+
+```dotenv
+DATABASES=[{"name":"analytics","host":"localhost","user":"readonly"},{"name":"reporting","host":"localhost","user":"readonly"}]
+SECURITY_BLOCKED_TABLES=["secrets","private.payments"]
+SECURITY_BLOCKED_COLUMNS=["password","users.email"]
+SECURITY_ALLOW_EXPLAIN=false
+```
+
+表限制支持裸表名及 `schema.table`。为避免别名、CTE 与隐式投影绕过，配置列限制后拒绝通配符及直接整行引用，限定列名也会保守地阻止其他表中的同名列。EXPLAIN 启用时仅支持 `EXPLAIN [ANALYZE] SELECT/WITH ...`，内部查询仍执行完整安全校验，其他 EXPLAIN 选项暂不支持。
+
+请求链路使用独立的 ContextVar 请求上下文，记录成功/失败请求、LLM 调用及延迟、SQL 拒绝与数据库执行时间。数据库执行及两类 LLM 调用均受并发限制；SQL 生成错误及校验失败按 `RESILIENCE_RETRY_DELAY` 和 `RESILIENCE_BACKOFF_FACTOR` 退避。问题长度及返回结果最低置信度分别受 `VALIDATION_MAX_QUESTION_LENGTH`、`VALIDATION_MIN_CONFIDENCE_SCORE` 控制。
+
+`QueryResponse.to_dict()` 保留可空字段，并将未知 `tokens_used` 序列化为 0。未知不代表调用未消耗 token。
+
+响应模型在整体校验阶段拒绝成功状态携带错误、失败状态缺少错误或携带结果数据；即使错误字段未显式传入，也会执行校验。结果验证异常返回 0 置信度，默认最低置信度策略会阻止交付未验证的数据。
+
+并发上限通过 `RESILIENCE_QUERY_LIMIT`（默认 10）和 `RESILIENCE_LLM_LIMIT`（默认 5）配置。`VALIDATION_MAX_QUESTION_LENGTH` 范围为 1–10000，与请求模型的硬限制一致。

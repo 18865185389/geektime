@@ -178,10 +178,9 @@ class SQLExecutor:
         try:
             # Set statement timeout (PostgreSQL expects milliseconds)
             timeout_ms = int(timeout * 1000)
-            await conn.execute(f"SET statement_timeout = {timeout_ms}")
+            await conn.execute("SELECT set_config('statement_timeout', $1, true)", str(timeout_ms))
 
             # Set safe search_path to prevent schema injection
-            # Using execute with literal to avoid SQL injection
             search_path = self.security_config.safe_search_path
             # Validate search_path contains only safe characters
             if not all(c.isalnum() or c in ("_", ",", " ") for c in search_path):
@@ -189,7 +188,7 @@ class SQLExecutor:
                     message="Invalid search_path configuration",
                     details={"search_path": search_path},
                 )
-            await conn.execute(f"SET search_path = '{search_path}'")
+            await conn.execute("SELECT set_config('search_path', $1, true)", search_path)
 
             # Switch to read-only role if configured
             if self.security_config.readonly_role:
@@ -200,7 +199,7 @@ class SQLExecutor:
                         message="Invalid readonly_role configuration",
                         details={"readonly_role": readonly_role},
                     )
-                await conn.execute(f"SET ROLE {readonly_role}")
+                await conn.execute("SELECT set_config('role', $1, true)", readonly_role)
 
         except asyncpg.PostgresError as e:
             raise DatabaseError(

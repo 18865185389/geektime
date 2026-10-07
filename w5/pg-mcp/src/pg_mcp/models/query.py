@@ -5,9 +5,9 @@ responses containing query results or errors.
 """
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ReturnType(StrEnum):
@@ -172,49 +172,20 @@ class QueryResponse(BaseModel):
 
         return result
 
-    @field_validator("data")
-    @classmethod
-    def validate_data(cls, v: QueryResult | None, info: Any) -> QueryResult | None:
-        """Ensure data is present only when success is True and executed.
-
-        Args:
-            v: The data field value.
-            info: Validation info containing other fields.
+    @model_validator(mode="after")
+    def validate_response(self) -> Self:
+        """Validate success, data and error together, including omitted defaults.
 
         Returns:
-            QueryResult | None: Validated data field.
+            The response when success and payload fields are consistent.
+        Raises:
+            ValueError: If a failed response lacks an error or contains data,
+                or a successful response contains an error.
         """
-        if hasattr(info, "data"):
-            success = info.data.get("success", False)
-            error = info.data.get("error")
-            if not success and v is not None:
-                raise ValueError("Data should not be present when success is False")
-            if success and error is not None and v is not None:
-                raise ValueError("Cannot have both data and error")
-        return v
-
-    @field_validator("error")
-    @classmethod
-    def validate_error(cls, v: ErrorDetail | None, info: Any) -> ErrorDetail | None:
-        """Ensure error is present when success is False.
-
-        Args:
-            v: The error field value.
-            info: Validation info containing other fields.
-
-        Returns:
-            ErrorDetail | None: Validated error field.
-        """
-        if hasattr(info, "data"):
-            success = info.data.get("success", False)
-            if not success and v is None:
-                raise ValueError("Error must be present when success is False")
-        return v
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert response to dictionary.
-
-        Returns:
-            dict: Dictionary representation of query response.
-        """
-        return self.model_dump(exclude_none=True)
+        if not self.success and self.error is None:
+            raise ValueError("Error must be present when success is False")
+        if not self.success and self.data is not None:
+            raise ValueError("Data should not be present when success is False")
+        if self.success and self.error is not None:
+            raise ValueError("Successful response cannot contain an error")
+        return self

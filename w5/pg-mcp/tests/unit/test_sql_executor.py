@@ -245,10 +245,14 @@ class TestSQLExecutor:
         execute_commands = [str(call[0][0]) for call in execute_calls]
 
         # Check timeout was set (15 seconds = 15000 ms)
-        assert any("SET statement_timeout = 15000" in cmd for cmd in execute_commands)
+        mock_connection.execute.assert_any_await(
+            "SELECT set_config('statement_timeout', $1, true)", "15000"
+        )
 
         # Check search_path was set
-        assert any("SET search_path = 'public'" in cmd for cmd in execute_commands)
+        mock_connection.execute.assert_any_await(
+            "SELECT set_config('search_path', $1, true)", "public"
+        )
 
     @pytest.mark.asyncio
     async def test_session_params_with_readonly_role(
@@ -280,7 +284,9 @@ class TestSQLExecutor:
         # Assert - verify SET ROLE was called
         execute_calls = mock_connection.execute.call_args_list
         execute_commands = [str(call[0][0]) for call in execute_calls]
-        assert any("SET ROLE readonly_user" in cmd for cmd in execute_commands)
+        mock_connection.execute.assert_any_await(
+            "SELECT set_config('role', $1, true)", "readonly_user"
+        )
 
     @pytest.mark.asyncio
     async def test_session_params_invalid_search_path(

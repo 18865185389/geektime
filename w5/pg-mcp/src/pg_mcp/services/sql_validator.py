@@ -5,6 +5,7 @@ It ensures that only safe, read-only queries are executed and blocks potentially
 dangerous operations.
 """
 
+import re
 from typing import ClassVar
 
 import sqlglot
@@ -79,7 +80,7 @@ class SQLValidator:
         config: SecurityConfig,
         blocked_tables: list[str] | None = None,
         blocked_columns: list[str] | None = None,
-        allow_explain: bool = False,
+        allow_explain: bool | None = None,
     ) -> None:
         """Initialize SQL validator.
 
@@ -90,9 +91,9 @@ class SQLValidator:
             allow_explain: Whether to allow EXPLAIN statements.
         """
         self.config = config
-        self.blocked_tables = {t.lower() for t in (blocked_tables or [])}
-        self.blocked_columns = {c.lower() for c in (blocked_columns or [])}
-        self.allow_explain = allow_explain
+        self.blocked_tables = {t.lower() for t in (config.blocked_tables if blocked_tables is None else blocked_tables)}
+        self.blocked_columns = {c.lower() for c in (config.blocked_columns if blocked_columns is None else blocked_columns)}
+        self.allow_explain = config.allow_explain if allow_explain is None else allow_explain
 
         # Combine built-in dangerous functions with custom blocked functions
         self.blocked_functions = self.BUILTIN_DANGEROUS_FUNCTIONS | {
@@ -156,10 +157,14 @@ class SQLValidator:
             if cmd_name == "EXPLAIN":
                 if not self.allow_explain:
                     raise SecurityViolationError("EXPLAIN statements are not allowed")
-                # EXPLAIN is read-only and safe - it only shows query plans without executing.
-                # sqlglot 28.5.0 cannot parse EXPLAIN syntax reliably (falls back to Command),
-                # so we don't attempt to validate the inner query string to avoid false positives.
-                # Even "EXPLAIN DELETE" is safe as it won't actually delete data.
+                # Accept only explicit SELECT/WITH payloads; never bypass their checks.
+                match = re.fullmatch(
+                    r"\s*EXPLAIN\s+(?:ANALYZE\s+)?((?:SELECT|WITH)\b.*)",
+                    sql, flags=re.IGNORECASE | re.DOTALL,
+                )
+                if match is None:
+                    raise SecurityViolationError("EXPLAIN requires a safe SELECT query")
+                self.validate_or_raise(match.group(1))
                 return None
             else:
                 # Other commands are not allowed
@@ -249,7 +254,8 @@ class SQLValidator:
         for table in statement.find_all(exp.Table):
             table_name = table.name.lower() if table.name else ""
 
-            if table_name in self.blocked_tables:
+            qualified_name = f"{table.db.lower()}.{table_name}" if table.db else table_name
+            if table_name in self.blocked_tables or qualified_name in self.blocked_tables:
                 return f"Access to table '{table_name}' is not allowed"
 
         return None
@@ -266,14 +272,23 @@ class SQLValidator:
         if not self.blocked_columns:
             return None
 
+        # Wildcards and whole-row references can expose denied columns implicitly.
+        if any(statement.find_all(exp.Star)):
+            return "Wildcard access is not allowed when columns are blocked"
+        tables = {t.alias_or_name.lower(): t.name.lower() for t in statement.find_all(exp.Table)}
         # Find all column references
         for column in statement.find_all(exp.Column):
             column_name = column.name.lower() if column.name else ""
 
+            if column_name in tables and not column.table:
+                return "Whole-row access is not allowed when columns are blocked"
             # Check for exact match
             if column_name in self.blocked_columns:
                 return f"Access to column '{column_name}' is not allowed"
 
+            # Conservatively deny matching column names even through CTEs and aliases.
+            if any(c.rsplit(".", 1)[-1] == column_name for c in self.blocked_columns):
+                return f"Access to column '{column_name}' is not allowed"
             # Check for qualified column names (table.column)
             if column.table:
                 qualified_name = f"{column.table.lower()}.{column_name}"

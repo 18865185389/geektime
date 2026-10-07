@@ -486,20 +486,20 @@ class TestExplainStatements:
         assert is_valid
         assert error is None
 
-    def test_explain_with_dangerous_query_allowed(self) -> None:
-        """Test EXPLAIN with dangerous underlying query is allowed.
-
-        EXPLAIN only shows query plans and doesn't execute the query,
-        so even "EXPLAIN DELETE" is safe as it won't modify data.
-        """
+    @pytest.mark.parametrize("sql", [
+        "EXPLAIN DELETE FROM users",
+        "EXPLAIN ANALYZE DELETE FROM users",
+        "EXPLAIN SELECT pg_sleep(10)",
+        "EXPLAIN SELECT password FROM users",
+    ])
+    def test_explain_rechecks_security(self, sql: str) -> None:
+        """Reject unsafe EXPLAIN payloads, including denied columns in SELECT."""
         config = SecurityConfig()
-        validator = SQLValidator(config=config, allow_explain=True)
-
-        # EXPLAIN DELETE is safe - it only shows the execution plan
-        sql = "EXPLAIN DELETE FROM users"
+        validator = SQLValidator(config=config, allow_explain=True, blocked_columns=["password"])
         is_valid, error = validator.validate(sql)
-        assert is_valid
-        assert error is None
+        assert not is_valid
+        assert error is not None
+        assert not validator.validate("EXPLAIN SELECT * FROM users")[0]
 
 
 class TestValidatorHelperMethods:

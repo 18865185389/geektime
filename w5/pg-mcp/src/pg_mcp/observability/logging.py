@@ -71,6 +71,11 @@ class SensitiveDataFilter(logging.Filter):
         Returns:
             bool: Always True to allow the record through (after sanitization).
         """
+        from pg_mcp.observability.tracing import get_request_id
+
+        if not hasattr(record, "request_id"):
+            record.request_id = get_request_id()
+
         # Sanitize args if they exist
         if hasattr(record, "args") and record.args:
             record.args = self._sanitize_data(record.args)

@@ -404,7 +404,7 @@ class TestResultValidation:
             request_id="test-123",
         )
 
-        assert confidence == 100
+        assert confidence == 0
 
 
 class TestExecuteQueryFlow:

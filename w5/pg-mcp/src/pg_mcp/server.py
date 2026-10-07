@@ -97,16 +97,11 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
         # 3. Create database connection pools
         logger.info("Creating database connection pools...")
         _pools = {}
-        # Note: For single database configuration, we use the main database config
-        pool = await create_pool(_settings.database)
-        _pools[_settings.database.name] = pool
-        logger.info(
-            f"Created connection pool for database '{_settings.database.name}'",
-            extra={
-                "min_size": _settings.database.min_pool_size,
-                "max_size": _settings.database.max_pool_size,
-            },
-        )
+        database_configs = _settings.databases or [_settings.database]
+        for db_config in database_configs:
+            if db_config.name in _pools:
+                raise ValueError(f"Duplicate database name: {db_config.name}")
+            _pools[db_config.name] = await create_pool(db_config)
 
         # 4. Load Schema cache
         logger.info("Initializing schema cache...")
@@ -152,18 +147,20 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
         # SQL Validator
         sql_validator = SQLValidator(
             config=_settings.security,
-            blocked_tables=None,  # Can be configured via settings if needed
-            blocked_columns=None,  # Can be configured via settings if needed
-            allow_explain=False,
+            blocked_tables=_settings.security.blocked_tables,
+            blocked_columns=_settings.security.blocked_columns,
+            allow_explain=_settings.security.allow_explain,
         )
 
         # SQL Executor (create one per database)
         sql_executors: dict[str, SQLExecutor] = {}
-        for db_name, pool in _pools.items():
+        for db_config in database_configs:
+            db_name = db_config.name
+            pool = _pools[db_name]
             executor = SQLExecutor(
                 pool=pool,
                 security_config=_settings.security,
-                db_config=_settings.database,
+                db_config=db_config,
             )
             sql_executors[db_name] = executor
             logger.info(f"Created SQL executor for database '{db_name}'")
@@ -185,8 +182,8 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
 
         # Rate Limiter
         _rate_limiter = MultiRateLimiter(
-            query_limit=10,  # Can be made configurable
-            llm_limit=5,  # Can be made configurable
+            query_limit=_settings.resilience.query_limit,
+            llm_limit=_settings.resilience.llm_limit,
         )
 
         # 8. Create QueryOrchestrator
@@ -194,12 +191,15 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:  # type: ignore[type-a
         _orchestrator = QueryOrchestrator(
             sql_generator=sql_generator,
             sql_validator=sql_validator,
-            sql_executor=sql_executors[_settings.database.name],  # Use primary executor
+            sql_executor=sql_executors,
             result_validator=result_validator,
             schema_cache=_schema_cache,
             pools=_pools,
             resilience_config=_settings.resilience,
             validation_config=_settings.validation,
+            rate_limiter=_rate_limiter,
+            metrics=_metrics,
+            circuit_breaker=_circuit_breaker,
         )
 
         logger.info("PostgreSQL MCP Server initialization complete!")
@@ -356,9 +356,6 @@ async def query(
     try:
         response: QueryResponse = await _orchestrator.execute_query(request)
         result = response.to_dict()
-        # Ensure tokens_used is always present
-        if "tokens_used" not in result:
-            result["tokens_used"] = 0
         return result
     except Exception as e:
         logger.exception("Unexpected error in query tool")
